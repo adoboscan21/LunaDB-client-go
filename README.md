@@ -67,7 +67,7 @@ func main() {
  fmt.Println(" 🐉 LINEAGE II MMORPG SIMULATOR: LunaDB vs MARIADB vs POSTGRESQL (1M CHARS) 🐉 ")
  fmt.Println("=========================================================================================")
 
- mtMetrics := runMemoryTools()
+ mtMetrics := runLunaDB()
  mariaMetrics := runMariaDB()
  pgMetrics := runPostgreSQL()
 
@@ -77,7 +77,7 @@ func main() {
 // ==========================================
 // ENGINE 1: LunaDB
 // ==========================================
-func runMemoryTools() Metrics {
+func runLunaDB() Metrics {
  fmt.Println("\n>>> [1/3] BOOTING GAME SERVER WITH LunaDB <<<")
  var m Metrics
  m.EngineName = "LunaDB"
