@@ -18,53 +18,124 @@ import (
  "os"
  "strings"
  "sync"
+ "sync/atomic"
  "text/tabwriter"
  "time"
 
  mtclient "github.com/adoboscan21/lunadb-client-go"
  _ "github.com/go-sql-driver/mysql" // MariaDB/MySQL Driver
  _ "github.com/lib/pq"              // PostgreSQL Driver
+ "go.mongodb.org/mongo-driver/bson"
 )
 
-// Metrics stores the execution times for each phase
+// Constantes de simulación masiva (Enterprise ERP Peak)
+const (
+ TotalOrdersHistory = 1000000 // 🔥 1,000,000 Pedidos históricos en la BD
+ ConcurrentTx       = 10000   // 10,000 Transacciones/Lecturas Concurrentes (Fiebre de Quincena)
+)
+
+// Metrics almacena los tiempos de ejecución
 type Metrics struct {
- EngineName           string
- Connection           time.Duration
- Schema               time.Duration
- Insert               time.Duration
- LoginRead            time.Duration
- LootUpdate           time.Duration
- DeleteChar           time.Duration
- EventQuery           time.Duration
- AntiCheat            time.Duration
- SearchPlayer         time.Duration
- ShortLeaderboard     time.Duration
- DeepLeaderboard      time.Duration
- DistinctLevels       time.Duration
- ViewProfile          time.Duration
- SimpleCensus         time.Duration
- GlobalEconomy        time.Duration
- ServerMaintenance    time.Duration
- ExpEventUpdate       time.Duration
- BanWave              time.Duration
- SafeTradeTx          time.Duration
- AdenSiegeConcurrency time.Duration
- Cleanup              time.Duration
+ EngineName         string
+ Connection         time.Duration
+ Schema             time.Duration
+ Insert             time.Duration
+ OrderRead          time.Duration
+ PriceAdjustment    time.Duration
+ DeleteOrder        time.Duration
+ HighValueQuery     time.Duration
+ FraudDetection     time.Duration
+ SearchCustomer     time.Duration
+ TopOrdersRanking   time.Duration
+ DeepPagination     time.Duration
+ DistinctQuantities time.Duration
+ FullInvoiceJoin    time.Duration
+ SalesByBranch      time.Duration
+ GlobalRevenue      time.Duration
+ MassDispatch       time.Duration
+ BulkAdjustment     time.Duration
+ PurgeOldOrders     time.Duration
+ PaymentACIDTx      time.Duration
+ QuincenaRush       time.Duration
+ Cleanup            time.Duration
 }
 
-// printJSON is a helper to beautifully format output data
 func printJSON(data any) {
- pretty, err := json.MarshalIndent(data, "      ", "  ")
- if err != nil {
-  fmt.Println("      [Error formatting JSON]")
-  return
- }
+ pretty, _ := json.MarshalIndent(data, "      ", "  ")
  fmt.Printf("      %s\n", string(pretty))
+}
+
+// ---------------------------------------------------------
+// HELPERS PARA VALIDACIÓN ESTRICTA Y VISUALIZACIÓN DE DATOS
+// ---------------------------------------------------------
+
+// expectResp envuelve la verificación básica.
+func expectResp(phase string) func(*mtclient.CommandResponse, error) {
+ return func(resp *mtclient.CommandResponse, err error) {
+  if err != nil {
+   log.Fatalf("❌ [%s] Error de red/cliente: %v", phase, err)
+  }
+  if resp == nil {
+   log.Fatalf("❌ [%s] Error: Respuesta nula del servidor", phase)
+  }
+  if !resp.OK() {
+   log.Fatalf("❌ [%s] Error del motor: %s - %s", phase, resp.Status, resp.Message)
+  }
+ }
+}
+
+// expectMutation verifica y muestra un resumen de las mutaciones devueltas.
+func expectMutation(phase string) func(*mtclient.CommandResponse, error) {
+ return func(resp *mtclient.CommandResponse, err error) {
+  expectResp(phase)(resp, err)
+
+  fmt.Printf("      └─ ✅ %s\n", resp.Message)
+
+  // Imprimir contenido crudo si existe (como en una lectura directa)
+  if len(resp.RawData) > 0 {
+   var doc map[string]any
+   if err := bson.Unmarshal(resp.RawData, &doc); err == nil {
+    // Evitar imprimir arrays masivos en consola
+    if _, hasArray := doc["array"]; !hasArray {
+     printJSON(doc)
+    }
+   }
+  }
+ }
+}
+
+// expectQuery verifica y muestra el contenido real de los resultados de una Query.
+func expectQuery(phase string) func(*mtclient.CommandResponse, error) {
+ return func(resp *mtclient.CommandResponse, err error) {
+  expectResp(phase)(resp, err)
+
+  var resultWrapper struct {
+   Results any `bson:"results"`
+  }
+  if err := bson.Unmarshal(resp.RawData, &resultWrapper); err != nil {
+   log.Fatalf("❌ [%s] Falló decodificación BSON: %v", phase, err)
+  }
+
+  switch v := resultWrapper.Results.(type) {
+  case bson.A: // Array de documentos
+   if len(v) == 0 {
+    log.Fatalf("❌ [%s] FALSO POSITIVO: La consulta ejecutó, pero devolvió 0 datos.", phase)
+   }
+   fmt.Printf("      └─ ✅ Éxito: Se encontraron %d registros.\n", len(v))
+   fmt.Printf("      └─ 📄 Muestra del primer registro:\n")
+   printJSON(v[0])
+  case bson.M: // Mapa simple (usado en Counts)
+   fmt.Printf("      └─ ✅ Éxito: Resultado de Agregación:\n")
+   printJSON(v)
+  default: // Otros tipos (ej. lista plana de valores)
+   fmt.Printf("      └─ ✅ Éxito: Se devolvieron valores simples (Muestra: %v)\n", v)
+  }
+ }
 }
 
 func main() {
  fmt.Println("=========================================================================================")
- fmt.Println(" 🐉 LINEAGE II MMORPG SIMULATOR: LunaDB vs MARIADB vs POSTGRESQL (1M CHARS) 🐉 ")
+ fmt.Printf(" 🏭 ALIMENTOS POLAR ERP SIMULATOR: LunaDB vs MARIADB vs POSTGRESQL (%dK DB, %dk CCU) 🏭 \n", TotalOrdersHistory/1000, ConcurrentTx/1000)
  fmt.Println("=========================================================================================")
 
  mtMetrics := runLunaDB()
@@ -78,12 +149,11 @@ func main() {
 // ENGINE 1: LunaDB
 // ==========================================
 func runLunaDB() Metrics {
- fmt.Println("\n>>> [1/3] BOOTING GAME SERVER WITH LunaDB <<<")
+ fmt.Println("\n>>> [1/3] BOOTING ENTERPRISE ERP WITH LunaDB <<<")
  var m Metrics
  m.EngineName = "LunaDB"
 
- // --- Phase 0: Connection ---
- fmt.Println("⏳ [Phase 0] Boot: Connecting to Login Server (Pool: 100)...")
+ fmt.Println("⏳ [Phase 0] Boot: Connecting to Main Database...")
  start := time.Now()
  client := mtclient.NewClient(mtclient.ClientOptions{
   Host:               "localhost",
@@ -99,280 +169,292 @@ func runLunaDB() Metrics {
  }
  defer client.Close()
  m.Connection = time.Since(start)
- fmt.Printf("✅ Login Server Online in %v\n", m.Connection)
 
- colChars := fmt.Sprintf("l2_chars_%d", time.Now().UnixNano())
- colCastles := fmt.Sprintf("l2_castles_%d", time.Now().UnixNano())
- colClasses := fmt.Sprintf("l2_classes_%d", time.Now().UnixNano())
+ colOrders := fmt.Sprintf("polar_orders_%d", time.Now().UnixNano())
+ colBranches := fmt.Sprintf("polar_branches_%d", time.Now().UnixNano())
+ colProducts := fmt.Sprintf("polar_products_%d", time.Now().UnixNano())
 
- // --- Phase 1: Schema and Indexes ---
- fmt.Printf("⏳ [Phase 1] Init: Creating World (Aden, Elmore) and Indexes...\n")
+ fmt.Printf("⏳ [Phase 1] Init: Creating Financial Schema and Indexes...\n")
  start = time.Now()
- client.CollectionCreate(colChars)
- client.CollectionCreate(colCastles)
- client.CollectionCreate(colClasses)
+ expectResp("CollectionCreate Orders")(client.CollectionCreate(colOrders))
+ expectResp("CollectionCreate Branches")(client.CollectionCreate(colBranches))
+ expectResp("CollectionCreate Products")(client.CollectionCreate(colProducts))
 
- indexes := []string{"level", "adena", "castle_id", "class_id", "status", "status,level", "name"}
+ indexes := []string{"quantity", "total_bs", "usd_amount", "branch_id", "product_id", "status", "status,quantity", "customer_name"}
  for _, idx := range indexes {
-  client.CollectionIndexCreate(colChars, idx)
+  expectResp("IndexCreate " + idx)(client.CollectionIndexCreate(colOrders, idx))
  }
  m.Schema = time.Since(start)
- fmt.Printf("✅ World initialized in %v\n", m.Schema)
 
- // --- Phase 2: Massive Insertion ---
- fmt.Println("⏳ [Phase 2] Spawn: Generating 10 Castles, 20 Classes, and 1,000,000 Characters...")
+ fmt.Printf("⏳ [Phase 2] Data Gen: Inserting %d Historical Orders (Batches of 5000)...\n", TotalOrdersHistory)
  start = time.Now()
 
- castles := []string{"Aden", "Giran", "Goddard", "Oren", "Gludio", "Dion", "Innadril", "Rune", "Schuttgart"}
- castlesData := make([]any, len(castles))
- for i, c := range castles {
-  castlesData[i] = map[string]any{"_id": fmt.Sprintf("castle_%d", i), "name": c, "tax_rate": float64(15.0)}
+ branches := []string{"APC Los Cortijos", "APC Valencia", "APC Maracaibo", "APC Barquisimeto", "APC Puerto La Cruz", "APC San Cristobal", "APC Guayana"}
+ branchesData := make([]any, len(branches))
+ for i, b := range branches {
+  branchesData[i] = map[string]any{"_id": fmt.Sprintf("branch_%d", i), "name": b, "operating_budget": float64(1000000)}
  }
- client.CollectionItemSetMany(colCastles, castlesData)
+ expectResp("Insert Branches")(client.CollectionItemSetMany(colBranches, branchesData))
 
- classes := []string{"Gladiator", "Warlord", "Paladin", "Dark Avenger", "Treasure Hunter", "Hawkeye", "Sorcerer", "Necromancer", "Warlock", "Bishop", "Prophet", "Shillien Knight", "Bladedancer", "Abyss Walker", "Phantom Ranger", "Spellhowler", "Shillien Elder", "Overlord", "Warcryer", "Destroyer"}
- classesData := make([]any, len(classes))
- for i, c := range classes {
-  classesData[i] = map[string]any{"_id": fmt.Sprintf("class_%d", i), "title": c}
+ products := []string{"Harina P.A.N.", "Maltín Polar", "Cerveza Polar Pilsen", "Toddy", "Mantequilla Mavesa"}
+ productData := make([]any, len(products))
+ for i, p := range products {
+  productData[i] = map[string]any{"_id": fmt.Sprintf("prod_%d", i), "name": p}
  }
- client.CollectionItemSetMany(colClasses, classesData)
+ expectResp("Insert Products")(client.CollectionItemSetMany(colProducts, productData))
 
- totalChars := 1000000
- batchSize := 100000
- statuses := []string{"Online", "Offline", "PeaceZone", "Chaotic"}
+ batchSize := 5000
+ statuses := []string{"Pending", "Processed", "Shipped", "Cancelled"}
 
- for i := 0; i < totalChars; i += batchSize {
+ for i := 0; i < TotalOrdersHistory; i += batchSize {
   batch := make([]any, 0, batchSize)
   for j := 0; j < batchSize; j++ {
    id := i + j
    batch = append(batch, map[string]any{
-    "_id":       fmt.Sprintf("char_%d", id),
-    "name":      fmt.Sprintf("Hero_%d", id),
-    "level":     int32(rand.Intn(85) + 1),       // Max classic level 85
-    "adena":     float64(rand.Intn(2000000000)), // Up to 2 Billion Adena
-    "castle_id": fmt.Sprintf("castle_%d", rand.Intn(len(castles))),
-    "class_id":  fmt.Sprintf("class_%d", rand.Intn(len(classes))),
-    "status":    statuses[rand.Intn(len(statuses))],
+    "_id":           fmt.Sprintf("order_%d", id),
+    "customer_name": fmt.Sprintf("Supermercado_%d", id),
+    "quantity":      int32(rand.Intn(500) + 10),
+    "total_bs":      float64(rand.Intn(5000000)),
+    "usd_amount":    float64(rand.Intn(10000)),
+    "branch_id":     fmt.Sprintf("branch_%d", rand.Intn(len(branches))),
+    "product_id":    fmt.Sprintf("prod_%d", rand.Intn(len(products))),
+    "status":        statuses[rand.Intn(len(statuses))],
    })
   }
-  client.CollectionItemSetMany(colChars, batch)
+  expectResp(fmt.Sprintf("Insert Batch %d", i))(client.CollectionItemSetMany(colOrders, batch))
  }
  m.Insert = time.Since(start)
- fmt.Printf("✅ 1 Million characters spawned in %v\n", m.Insert)
 
- // --- Phase 3: Point Read ---
- fmt.Println("⏳ [Phase 3] Action: Character Login (Point Read)...")
+ fmt.Printf("⏳ [Phase 3] Action: Concurrent Order Lookups (%d requests)...\n", ConcurrentTx)
  start = time.Now()
- for i := 0; i < 100; i++ {
-  client.CollectionItemGet(colChars, "char_50000")
+ var successCount, errorCount int32
+ var wg sync.WaitGroup
+ wg.Add(ConcurrentTx)
+ for i := 0; i < ConcurrentTx; i++ {
+  go func() {
+   defer wg.Done()
+   res, err := client.CollectionItemGet(colOrders, fmt.Sprintf("order_%d", rand.Intn(TotalOrdersHistory)))
+   if err == nil && res.Found() {
+    atomic.AddInt32(&successCount, 1)
+   } else {
+    atomic.AddInt32(&errorCount, 1)
+   }
+  }()
  }
- m.LoginRead = time.Since(start) / 100
- fmt.Printf("✅ Character logged in %v (avg)\n", m.LoginRead)
+ wg.Wait()
+ m.OrderRead = time.Since(start) / time.Duration(ConcurrentTx)
+ fmt.Printf("      └─ ✅ Completadas: %d lecturas.\n", successCount)
 
- // --- Phase 4: Point Update ---
- fmt.Println("⏳ [Phase 4] Action: Loot Adena (Point Update)...")
+ fmt.Printf("⏳ [Phase 4] Action: Mass Price Inflation Adjustments (%d updates)...\n", ConcurrentTx)
  start = time.Now()
- for i := 0; i < 100; i++ {
-  client.CollectionItemUpdate(colChars, "char_50000", map[string]any{"adena": float64(9999999)})
+ successCount, errorCount = 0, 0
+ wg.Add(ConcurrentTx)
+ for i := 0; i < ConcurrentTx; i++ {
+  go func() {
+   defer wg.Done()
+   res, err := client.CollectionItemUpdate(colOrders, fmt.Sprintf("order_%d", rand.Intn(TotalOrdersHistory)), map[string]any{"total_bs": float64(9999999)})
+   if err == nil && res.OK() {
+    atomic.AddInt32(&successCount, 1)
+   } else {
+    atomic.AddInt32(&errorCount, 1)
+   }
+  }()
  }
- m.LootUpdate = time.Since(start) / 100
- fmt.Printf("✅ Adena updated in %v (avg)\n", m.LootUpdate)
+ wg.Wait()
+ m.PriceAdjustment = time.Since(start) / time.Duration(ConcurrentTx)
+ fmt.Printf("      └─ ✅ Completadas: %d actualizaciones.\n", successCount)
 
- // --- Phase 5: Point Delete ---
- fmt.Println("⏳ [Phase 5] Action: PK Delete (Point Delete)...")
+ fmt.Println("⏳ [Phase 5] Action: Cancel/Delete Specific Order...")
  start = time.Now()
- client.CollectionItemDelete(colChars, "char_50001")
- m.DeleteChar = time.Since(start)
- fmt.Printf("✅ Character deleted in %v\n", m.DeleteChar)
+ expectMutation("Delete Order")(client.CollectionItemDelete(colOrders, "order_50001"))
+ m.DeleteOrder = time.Since(start)
 
- // --- Phase 6: Deep Query ---
- fmt.Println("⏳ [Phase 6] Event: Seven Signs (lvl 70-85, Chaotic, Top Adena)...")
+ fmt.Println("⏳ [Phase 6] Report: High Value Processed Orders (qty 400-500, Processed, Top USD)...")
  start = time.Now()
  limit5 := 5
  qDeep := mtclient.Query{
   Filter: map[string]any{
    "and": []any{
-    map[string]any{"field": "status", "op": "=", "value": "Chaotic"},
-    map[string]any{"field": "level", "op": "between", "value": []any{int32(70), int32(85)}},
+    map[string]any{"field": "status", "op": "=", "value": "Processed"},
+    map[string]any{"field": "quantity", "op": "between", "value": []any{int32(400), int32(500)}},
    },
   },
-  OrderBy: []any{map[string]any{"field": "adena", "direction": "desc"}},
+  OrderBy: []any{map[string]any{"field": "usd_amount", "direction": "desc"}},
   Limit:   &limit5,
  }
- client.CollectionQuery(colChars, qDeep)
- m.EventQuery = time.Since(start)
- fmt.Printf("✅ Event query completed in %v\n", m.EventQuery)
+ expectQuery("HighValueQuery")(client.CollectionQuery(colOrders, qDeep))
+ m.HighValueQuery = time.Since(start)
 
- // --- Phase 7: Complex Filter (Short-Circuit) ---
- fmt.Println("⏳ [Phase 7] Admin: Anti-Bot Scan (Lvl < 20 Chaotic OR Adena > 1.9B)...")
+ fmt.Println("⏳ [Phase 7] Audit: Fraud Detection (Processed with qty < 50 OR USD > 9000)...")
  start = time.Now()
  qComplex := mtclient.Query{
   Filter: map[string]any{
    "or": []any{
     map[string]any{
      "and": []any{
-      map[string]any{"field": "status", "op": "=", "value": "Chaotic"},
-      map[string]any{"field": "level", "op": "<", "value": int32(20)},
+      map[string]any{"field": "status", "op": "=", "value": "Processed"},
+      map[string]any{"field": "quantity", "op": "<", "value": int32(50)},
      },
     },
-    map[string]any{"field": "adena", "op": ">", "value": float64(1900000000)},
+    map[string]any{"field": "usd_amount", "op": ">", "value": float64(9000)},
    },
   },
   Limit: &limit5,
  }
- client.CollectionQuery(colChars, qComplex)
- m.AntiCheat = time.Since(start)
- fmt.Printf("✅ Anti-Bot scan completed in %v\n", m.AntiCheat)
+ expectQuery("FraudDetection")(client.CollectionQuery(colOrders, qComplex))
+ m.FraudDetection = time.Since(start)
 
- // --- Phase 8: Wildcard Search ---
- fmt.Println("⏳ [Phase 8] UI: Search Clan Member (name LIKE 'Hero_777%')...")
+ fmt.Println("⏳ [Phase 8] Support: Search Customer (name LIKE 'Supermercado_777%')...")
  start = time.Now()
  qWildcard := mtclient.Query{
-  Filter: map[string]any{"field": "name", "op": "like", "value": "Hero_777%"},
+  Filter: map[string]any{"field": "customer_name", "op": "like", "value": "Supermercado_777%"},
   Limit:  &limit5,
  }
- client.CollectionQuery(colChars, qWildcard)
- m.SearchPlayer = time.Since(start)
- fmt.Printf("✅ Search completed in %v\n", m.SearchPlayer)
+ expectQuery("SearchCustomer")(client.CollectionQuery(colOrders, qWildcard))
+ m.SearchCustomer = time.Since(start)
 
- // --- Phase 9: Short Pagination ---
- fmt.Println("⏳ [Phase 9] UI: Top 10 PvP Players (Offset 1000)...")
+ fmt.Println("⏳ [Phase 9] Report: Top 10 Largest Orders by Quantity (Offset 1000)...")
  start = time.Now()
  limit10 := 10
  qPag := mtclient.Query{
-  OrderBy: []any{map[string]any{"field": "level", "direction": "desc"}},
+  OrderBy: []any{map[string]any{"field": "quantity", "direction": "desc"}},
   Limit:   &limit10,
   Offset:  1000,
  }
- client.CollectionQuery(colChars, qPag)
- m.ShortLeaderboard = time.Since(start)
- fmt.Printf("✅ Leaderboard loaded in %v\n", m.ShortLeaderboard)
+ expectQuery("TopOrdersRanking")(client.CollectionQuery(colOrders, qPag))
+ m.TopOrdersRanking = time.Since(start)
 
- // --- Phase 10: Deep Pagination ---
- fmt.Println("⏳ [Phase 10] UI: Deep Global Ranking (Offset 800k)...")
+ fmt.Println("⏳ [Phase 10] Report: Deep Pagination by USD Value (Offset 500k)...")
  start = time.Now()
  qDeepPag := mtclient.Query{
-  OrderBy: []any{map[string]any{"field": "adena", "direction": "asc"}},
+  OrderBy: []any{map[string]any{"field": "usd_amount", "direction": "asc"}},
   Limit:   &limit5,
-  Offset:  800000,
+  Offset:  500000,
  }
- client.CollectionQuery(colChars, qDeepPag)
- m.DeepLeaderboard = time.Since(start)
- fmt.Printf("✅ Deep ranking completed in %v\n", m.DeepLeaderboard)
+ expectQuery("DeepPagination")(client.CollectionQuery(colOrders, qDeepPag))
+ m.DeepPagination = time.Since(start)
 
- // --- Phase 11: Distinct Values ---
- fmt.Println("⏳ [Phase 11] Stats: Level Distribution (Distinct 'level')...")
+ fmt.Println("⏳ [Phase 11] BI: Distinct Order Quantities...")
  start = time.Now()
- client.CollectionQuery(colChars, mtclient.Query{Distinct: "level"})
- m.DistinctLevels = time.Since(start)
- fmt.Printf("✅ Distinct levels calculated in %v\n", m.DistinctLevels)
+ expectQuery("DistinctQuantities")(client.CollectionQuery(colOrders, mtclient.Query{Distinct: "quantity"}))
+ m.DistinctQuantities = time.Since(start)
 
- // --- Phase 12: Lookups (Multi-Joins) ---
- fmt.Println("⏳ [Phase 12] UI: View Profile (Multi-Join Castle/Class)...")
+ fmt.Println("⏳ [Phase 12] ERP: View Full Invoice Details (Multi-Join Branch/Product)...")
  start = time.Now()
  qJoin := mtclient.Query{
-  Filter: map[string]any{"field": "name", "op": "like", "value": "Hero_999%"},
+  Filter: map[string]any{"field": "customer_name", "op": "like", "value": "Supermercado_999%"},
   Lookups: []any{
-   map[string]any{"from": colCastles, "localField": "castle_id", "foreignField": "_id", "as": "castle_info"},
-   map[string]any{"from": colClasses, "localField": "class_id", "foreignField": "_id", "as": "class_info"},
+   map[string]any{"from": colBranches, "localField": "branch_id", "foreignField": "_id", "as": "branch_details"},
+   map[string]any{"from": colProducts, "localField": "product_id", "foreignField": "_id", "as": "product_details"},
   },
   Limit: &limit5,
  }
- client.CollectionQuery(colChars, qJoin)
- m.ViewProfile = time.Since(start)
- fmt.Printf("✅ Profile loaded in %v\n", m.ViewProfile)
+ expectQuery("FullInvoiceJoin")(client.CollectionQuery(colOrders, qJoin))
+ m.FullInvoiceJoin = time.Since(start)
 
- // --- Phase 13: Simple Aggregation ---
- fmt.Println("⏳ [Phase 13] Stats: Castle Population (Simple Aggregation)...")
+ fmt.Println("⏳ [Phase 13] BI: Total Orders by Branch (Simple Aggregation)...")
  start = time.Now()
  qAgg1 := mtclient.Query{
-  GroupBy:      []string{"castle_id"},
-  Aggregations: map[string]any{"total": map[string]any{"func": "count", "field": "*"}},
+  GroupBy:      []string{"branch_id"},
+  Aggregations: map[string]any{"total_orders": map[string]any{"func": "count", "field": "*"}},
  }
- client.CollectionQuery(colChars, qAgg1)
- m.SimpleCensus = time.Since(start)
- fmt.Printf("✅ Population census completed in %v\n", m.SimpleCensus)
+ expectQuery("SalesByBranch")(client.CollectionQuery(colOrders, qAgg1))
+ m.SalesByBranch = time.Since(start)
 
- // --- Phase 14: Multi-Level Aggregation ---
- fmt.Println("⏳ [Phase 14] Stats: Aden Global Economy (Multi-Aggregation)...")
+ fmt.Println("⏳ [Phase 14] BI: Global USD Revenue by Branch and Status (Multi-Aggregation)...")
  start = time.Now()
  qAgg2 := mtclient.Query{
-  GroupBy: []string{"castle_id", "status"},
+  GroupBy: []string{"branch_id", "status"},
   Aggregations: map[string]any{
-   "total":     map[string]any{"func": "count", "field": "*"},
-   "sum_adena": map[string]any{"func": "sum", "field": "adena"},
+   "total_orders": map[string]any{"func": "count", "field": "*"},
+   "sum_usd":      map[string]any{"func": "sum", "field": "usd_amount"},
   },
  }
- client.CollectionQuery(colChars, qAgg2)
- m.GlobalEconomy = time.Since(start)
- fmt.Printf("✅ Economy calculated in %v\n", m.GlobalEconomy)
+ expectQuery("GlobalRevenue")(client.CollectionQuery(colOrders, qAgg2))
+ m.GlobalRevenue = time.Since(start)
 
- // --- Phase 15: Find & Modify (Two-Trip) ---
- fmt.Println("⏳ [Phase 15] Server: Maintenance (Move 1000 Online -> Offline)...")
+ fmt.Println("⏳ [Phase 15] Logistics: Mass Dispatch (100 Pending -> Shipped)...")
  start = time.Now()
- limit1000 := 1000
- respPending, _ := client.CollectionQuery(colChars, mtclient.Query{
-  Filter: map[string]any{"field": "status", "op": "=", "value": "Online"}, Limit: &limit1000, Projection: []string{"_id"},
+ limit100 := 100
+ respPending, err := client.CollectionQuery(colOrders, mtclient.Query{
+  Filter: map[string]any{"field": "status", "op": "=", "value": "Pending"}, Limit: &limit100, Projection: []string{"_id"},
  })
- var pendingUsers []map[string]any
- respPending.UnmarshalResults(&pendingUsers)
- bulkModify := make([]any, len(pendingUsers))
- for i, u := range pendingUsers {
-  bulkModify[i] = map[string]any{"_id": u["_id"], "patch": map[string]any{"status": "Offline"}}
+ expectResp("Fetch Pending")(respPending, err)
+
+ var pendingOrders []map[string]any
+ respPending.UnmarshalResults(&pendingOrders)
+ bulkModify := make([]any, len(pendingOrders))
+ for i, o := range pendingOrders {
+  bulkModify[i] = map[string]any{"_id": o["_id"], "patch": map[string]any{"status": "Shipped"}}
  }
- client.CollectionItemUpdateMany(colChars, bulkModify)
- m.ServerMaintenance = time.Since(start)
- fmt.Printf("✅ Maintenance completed in %v\n", m.ServerMaintenance)
+ expectMutation("MassDispatch")(client.CollectionItemUpdateMany(colOrders, bulkModify))
+ m.MassDispatch = time.Since(start)
 
- // --- Phase 16: Bulk Update ---
- fmt.Println("⏳ [Phase 16] Admin: Grant Max Level (Bulk Update)...")
+ fmt.Println("⏳ [Phase 16] Admin: Bulk Quantity Adjustment for VIP Orders...")
  start = time.Now()
- client.CollectionItemUpdateMany(colChars, []any{
-  map[string]any{"_id": "char_10", "patch": map[string]any{"level": int32(85)}},
-  map[string]any{"_id": "char_20", "patch": map[string]any{"level": int32(85)}},
- })
- m.ExpEventUpdate = time.Since(start)
- fmt.Printf("✅ EXP Event applied in %v\n", m.ExpEventUpdate)
+ expectMutation("Bulk Adjustment")(client.CollectionItemUpdateMany(colOrders, []any{
+  map[string]any{"_id": "order_10", "patch": map[string]any{"quantity": int32(5000)}},
+  map[string]any{"_id": "order_20", "patch": map[string]any{"quantity": int32(5000)}},
+ }))
+ m.BulkAdjustment = time.Since(start)
 
- // --- Phase 17: Bulk Delete ---
- fmt.Println("⏳ [Phase 17] Admin: Bot Ban Wave (Bulk Delete)...")
+ fmt.Println("⏳ [Phase 17] Maintenance: Purge 10,000 Old/Cancelled Orders...")
  start = time.Now()
- client.CollectionItemDeleteMany(colChars, []string{"char_60", "char_70"})
- m.BanWave = time.Since(start)
- fmt.Printf("✅ Ban wave completed in %v\n", m.BanWave)
+ oldOrders := make([]string, 10000)
+ for i := 0; i < 10000; i++ {
+  oldOrders[i] = fmt.Sprintf("order_%d", TotalOrdersHistory-i-1)
+ }
+ expectMutation("PurgeOldOrders")(client.CollectionItemDeleteMany(colOrders, oldOrders))
+ m.PurgeOldOrders = time.Since(start)
 
- // --- Phase 18: ACID Transaction ---
- fmt.Println("⏳ [Phase 18] Trade: Safe Exchange (ACID Transaction)...")
+ fmt.Println("⏳ [Phase 18] Finance: Payment Processing (ACID Transaction)...")
  start = time.Now()
- tx, _ := client.Begin()
- tx.CollectionItemUpdate(colChars, "char_10", map[string]any{"adena": 0})
- tx.Rollback() // Trade cancelled securely
- m.SafeTradeTx = time.Since(start)
- fmt.Printf("✅ Trade safely rolled back in %v\n", m.SafeTradeTx)
+ tx, err := client.Begin()
+ if err != nil {
+  log.Fatalf("❌ Fallo al iniciar TX: %v", err)
+ }
+ _, errTx := tx.CollectionItemUpdate(colOrders, "order_10", map[string]any{"usd_amount": 0, "status": "Processed"})
+ if errTx != nil {
+  log.Fatalf("❌ Error en actualización dentro de TX: %v", errTx)
+ }
+ expectMutation("TX Rollback")(tx.Rollback())
+ m.PaymentACIDTx = time.Since(start)
 
- // --- Phase 19: Concurrency ---
- fmt.Println("⏳ [Phase 19] Event: Aden Castle Siege (5000 concurrent reads)...")
+ fmt.Printf("⏳ [Phase 19] Stress: Quincena Rush (%d concurrent Ops)...\n", ConcurrentTx)
  start = time.Now()
- var wg sync.WaitGroup
- wg.Add(5000)
- for i := 0; i < 5000; i++ {
-  go func() {
+ successCount, errorCount = 0, 0
+ wg.Add(ConcurrentTx)
+ for i := 0; i < ConcurrentTx; i++ {
+  go func(txID int) {
    defer wg.Done()
-   client.CollectionItemGet(colChars, fmt.Sprintf("char_%d", rand.Intn(100000)))
-  }()
+   targetOrder := fmt.Sprintf("order_%d", rand.Intn(TotalOrdersHistory-10000))
+   if txID%2 == 0 {
+    res, err := client.CollectionItemGet(colOrders, targetOrder)
+    if err == nil && res.Found() {
+     atomic.AddInt32(&successCount, 1)
+    } else {
+     atomic.AddInt32(&errorCount, 1)
+    }
+   } else {
+    res, err := client.CollectionItemUpdate(colOrders, targetOrder, map[string]any{"status": "Processed"})
+    if err == nil && res.OK() {
+     atomic.AddInt32(&successCount, 1)
+    } else {
+     atomic.AddInt32(&errorCount, 1)
+    }
+   }
+  }(i)
  }
  wg.Wait()
- m.AdenSiegeConcurrency = time.Since(start)
- fmt.Printf("✅ Castle Siege withstood without lag in %v\n", m.AdenSiegeConcurrency)
+ m.QuincenaRush = time.Since(start)
+ fmt.Printf("      └─ ✅ Completadas: %d operaciones en Rush.\n", successCount)
 
- // --- Phase 20: Cleanup ---
- fmt.Println("⏳ [Phase 20] Shutdown: World Wipe (Cleanup)...")
+ fmt.Println("⏳ [Phase 20] Shutdown: Drop ERP Tables...")
  start = time.Now()
- client.CollectionDelete(colChars)
- client.CollectionDelete(colCastles)
- client.CollectionDelete(colClasses)
+ expectResp("Drop Orders")(client.CollectionDelete(colOrders))
+ expectResp("Drop Branches")(client.CollectionDelete(colBranches))
+ expectResp("Drop Products")(client.CollectionDelete(colProducts))
  m.Cleanup = time.Since(start)
- fmt.Printf("✅ World wiped in %v\n", m.Cleanup)
 
  return m
 }
@@ -381,7 +463,7 @@ func runLunaDB() Metrics {
 // ENGINE 2: MARIADB
 // ==========================================
 func runMariaDB() Metrics {
- fmt.Println("\n>>> [2/3] BOOTING GAME SERVER WITH MARIADB <<<")
+ fmt.Println("\n>>> [2/3] BOOTING ENTERPRISE ERP WITH MARIADB <<<")
  var m Metrics
  m.EngineName = "MariaDB"
 
@@ -390,8 +472,7 @@ func runMariaDB() Metrics {
  dbInit.Ping()
  m.Connection = time.Since(start)
 
- dbName := fmt.Sprintf("l2_db_%d", time.Now().UnixNano())
- start = time.Now()
+ dbName := fmt.Sprintf("polar_db_%d", time.Now().UnixNano())
  dbInit.Exec(fmt.Sprintf("CREATE DATABASE %s;", dbName))
  dbInit.Close()
  db, _ := sql.Open("mysql", fmt.Sprintf("root:12345678@tcp(127.0.0.1:3306)/%s?multiStatements=true", dbName))
@@ -399,126 +480,145 @@ func runMariaDB() Metrics {
  db.SetMaxOpenConns(100)
 
  createTables := `
-  CREATE TABLE castles (_id VARCHAR(50) PRIMARY KEY, name VARCHAR(100), tax_rate DOUBLE);
-  CREATE TABLE classes (_id VARCHAR(50) PRIMARY KEY, title VARCHAR(100));
-  CREATE TABLE characters (
-   _id VARCHAR(50) PRIMARY KEY, name VARCHAR(100), level INT, adena DOUBLE, castle_id VARCHAR(50), class_id VARCHAR(50), status VARCHAR(20),
-   INDEX idx_lvl (level), INDEX idx_adena (adena), INDEX idx_castle (castle_id), INDEX idx_class (class_id), INDEX idx_status (status), INDEX idx_name(name)
+  CREATE TABLE branches (_id VARCHAR(50) PRIMARY KEY, name VARCHAR(100), operating_budget DOUBLE);
+  CREATE TABLE products (_id VARCHAR(50) PRIMARY KEY, name VARCHAR(100));
+  CREATE TABLE orders (
+   _id VARCHAR(50) PRIMARY KEY, customer_name VARCHAR(100), quantity INT, total_bs DOUBLE, usd_amount DOUBLE, branch_id VARCHAR(50), product_id VARCHAR(50), status VARCHAR(20),
+   INDEX idx_qty (quantity), INDEX idx_bs (total_bs), INDEX idx_usd (usd_amount), INDEX idx_branch (branch_id), INDEX idx_prod (product_id), INDEX idx_status (status), INDEX idx_name(customer_name),
+   INDEX idx_status_qty (status, quantity)
   );
  `
+ start = time.Now()
  db.Exec(createTables)
  m.Schema = time.Since(start)
 
  start = time.Now()
- for i := 0; i < 9; i++ {
-  db.Exec("INSERT INTO castles VALUES (?, ?, ?)", fmt.Sprintf("castle_%d", i), "C", 15.0)
+ for i := 0; i < 7; i++ {
+  db.Exec("INSERT INTO branches VALUES (?, ?, ?)", fmt.Sprintf("branch_%d", i), "Sucursal", 1000000.0)
  }
- for i := 0; i < 20; i++ {
-  db.Exec("INSERT INTO classes VALUES (?, ?)", fmt.Sprintf("class_%d", i), "Cls")
+ for i := 0; i < 5; i++ {
+  db.Exec("INSERT INTO products VALUES (?, ?)", fmt.Sprintf("prod_%d", i), "Producto")
  }
- statuses := []string{"Online", "Offline", "PeaceZone", "Chaotic"}
- for i := 0; i < 1000000; i += 5000 {
+ statuses := []string{"Pending", "Processed", "Shipped", "Cancelled"}
+ for i := 0; i < TotalOrdersHistory; i += 5000 {
   vals, args := []string{}, []any{}
   for j := 0; j < 5000; j++ {
    id := i + j
-   vals = append(vals, "(?, ?, ?, ?, ?, ?, ?)")
-   args = append(args, fmt.Sprintf("char_%d", id), fmt.Sprintf("Hero_%d", id), rand.Intn(85)+1, float64(rand.Intn(2000000000)), fmt.Sprintf("castle_%d", rand.Intn(9)), fmt.Sprintf("class_%d", rand.Intn(20)), statuses[rand.Intn(4)])
+   vals = append(vals, "(?, ?, ?, ?, ?, ?, ?, ?)")
+   args = append(args, fmt.Sprintf("order_%d", id), fmt.Sprintf("Supermercado_%d", id), rand.Intn(500)+10, float64(rand.Intn(5000000)), float64(rand.Intn(10000)), fmt.Sprintf("branch_%d", rand.Intn(7)), fmt.Sprintf("prod_%d", rand.Intn(5)), statuses[rand.Intn(4)])
   }
-  db.Exec(fmt.Sprintf("INSERT INTO characters VALUES %s", strings.Join(vals, ",")), args...)
+  db.Exec(fmt.Sprintf("INSERT INTO orders VALUES %s", strings.Join(vals, ",")), args...)
  }
  m.Insert = time.Since(start)
 
  var dump string
+
+ fmt.Printf("⏳ [Phase 3] Action: Concurrent Order Lookups (%d requests)...\n", ConcurrentTx)
  start = time.Now()
- for i := 0; i < 100; i++ {
-  db.QueryRow("SELECT _id FROM characters WHERE _id = 'char_50000'").Scan(&dump)
+ var wg3 sync.WaitGroup
+ wg3.Add(ConcurrentTx)
+ for i := 0; i < ConcurrentTx; i++ {
+  go func() {
+   defer wg3.Done()
+   var localDump string
+   db.QueryRow("SELECT _id FROM orders WHERE _id = ?", fmt.Sprintf("order_%d", rand.Intn(TotalOrdersHistory))).Scan(&localDump)
+  }()
  }
- m.LoginRead = time.Since(start) / 100
+ wg3.Wait()
+ m.OrderRead = time.Since(start) / time.Duration(ConcurrentTx)
 
+ fmt.Printf("⏳ [Phase 4] Action: Mass Price Inflation Adjustments (%d updates)...\n", ConcurrentTx)
  start = time.Now()
- for i := 0; i < 100; i++ {
-  db.Exec("UPDATE characters SET adena = 9999999 WHERE _id = 'char_50000'")
+ var wg4 sync.WaitGroup
+ wg4.Add(ConcurrentTx)
+ for i := 0; i < ConcurrentTx; i++ {
+  go func() {
+   defer wg4.Done()
+   db.Exec("UPDATE orders SET total_bs = 9999999 WHERE _id = ?", fmt.Sprintf("order_%d", rand.Intn(TotalOrdersHistory)))
+  }()
  }
- m.LootUpdate = time.Since(start) / 100
+ wg4.Wait()
+ m.PriceAdjustment = time.Since(start) / time.Duration(ConcurrentTx)
 
  start = time.Now()
- db.Exec("DELETE FROM characters WHERE _id = 'char_50001'")
- m.DeleteChar = time.Since(start)
+ db.Exec("DELETE FROM orders WHERE _id = 'order_50001'")
+ m.DeleteOrder = time.Since(start)
 
  start = time.Now()
- r, _ := db.Query("SELECT _id FROM characters WHERE status = 'Chaotic' AND level BETWEEN 70 AND 85 ORDER BY adena DESC LIMIT 5")
+ r, _ := db.Query("SELECT _id FROM orders WHERE status = 'Processed' AND quantity BETWEEN 400 AND 500 ORDER BY usd_amount DESC LIMIT 5")
  for r.Next() {
   r.Scan(&dump)
  }
  r.Close()
- m.EventQuery = time.Since(start)
+ m.HighValueQuery = time.Since(start)
 
  start = time.Now()
- rc, _ := db.Query("SELECT _id FROM characters WHERE (status = 'Chaotic' AND level < 20) OR adena > 1900000000 LIMIT 5")
+ rc, _ := db.Query("SELECT _id FROM orders WHERE (status = 'Processed' AND quantity < 50) OR usd_amount > 9000 LIMIT 5")
  for rc.Next() {
   rc.Scan(&dump)
  }
  rc.Close()
- m.AntiCheat = time.Since(start)
+ m.FraudDetection = time.Since(start)
 
  start = time.Now()
- rw, _ := db.Query("SELECT _id FROM characters WHERE name LIKE 'Hero_777%' LIMIT 5")
+ rw, _ := db.Query("SELECT _id FROM orders WHERE customer_name LIKE 'Supermercado_777%' LIMIT 5")
  for rw.Next() {
   rw.Scan(&dump)
  }
  rw.Close()
- m.SearchPlayer = time.Since(start)
+ m.SearchCustomer = time.Since(start)
 
  start = time.Now()
- rp, _ := db.Query("SELECT _id FROM characters ORDER BY level DESC LIMIT 10 OFFSET 1000")
+ rp, _ := db.Query("SELECT _id FROM orders ORDER BY quantity DESC LIMIT 10 OFFSET 1000")
  for rp.Next() {
   rp.Scan(&dump)
  }
  rp.Close()
- m.ShortLeaderboard = time.Since(start)
+ m.TopOrdersRanking = time.Since(start)
 
+ fmt.Println("⏳ [Phase 10] Report: Deep Pagination by USD Value (Offset 500k)...")
  start = time.Now()
- rdp, _ := db.Query("SELECT _id FROM characters ORDER BY adena ASC LIMIT 5 OFFSET 800000")
+ rdp, _ := db.Query("SELECT _id FROM orders ORDER BY usd_amount ASC LIMIT 5 OFFSET 500000")
  for rdp.Next() {
   rdp.Scan(&dump)
  }
  rdp.Close()
- m.DeepLeaderboard = time.Since(start)
+ m.DeepPagination = time.Since(start)
 
  start = time.Now()
- rdis, _ := db.Query("SELECT DISTINCT level FROM characters")
+ rdis, _ := db.Query("SELECT DISTINCT quantity FROM orders")
  for rdis.Next() {
   rdis.Scan(&dump)
  }
  rdis.Close()
- m.DistinctLevels = time.Since(start)
+ m.DistinctQuantities = time.Since(start)
 
  start = time.Now()
- rj, _ := db.Query("SELECT c._id FROM characters c LEFT JOIN castles m ON c.castle_id = m._id LEFT JOIN classes cls ON c.class_id = cls._id WHERE c.name LIKE 'Hero_999%' LIMIT 5")
+ rj, _ := db.Query("SELECT o._id FROM orders o LEFT JOIN branches b ON o.branch_id = b._id LEFT JOIN products p ON o.product_id = p._id WHERE o.customer_name LIKE 'Supermercado_999%' LIMIT 5")
  for rj.Next() {
   rj.Scan(&dump)
  }
  rj.Close()
- m.ViewProfile = time.Since(start)
+ m.FullInvoiceJoin = time.Since(start)
 
  start = time.Now()
- rag, _ := db.Query("SELECT castle_id, COUNT(*) FROM characters GROUP BY castle_id")
+ rag, _ := db.Query("SELECT branch_id, COUNT(*) FROM orders GROUP BY branch_id")
  for rag.Next() {
   rag.Scan(&dump, &dump)
  }
  rag.Close()
- m.SimpleCensus = time.Since(start)
+ m.SalesByBranch = time.Since(start)
 
  start = time.Now()
- ram, _ := db.Query("SELECT castle_id, status, COUNT(*), SUM(adena) FROM characters GROUP BY castle_id, status")
+ ram, _ := db.Query("SELECT branch_id, status, COUNT(*), SUM(usd_amount) FROM orders GROUP BY branch_id, status")
  for ram.Next() {
   ram.Scan(&dump, &dump, &dump, &dump)
  }
  ram.Close()
- m.GlobalEconomy = time.Since(start)
+ m.GlobalRevenue = time.Since(start)
 
  start = time.Now()
- rfm, _ := db.Query("SELECT _id FROM characters WHERE status = 'Online' LIMIT 1000")
+ rfm, _ := db.Query("SELECT _id FROM orders WHERE status = 'Pending' LIMIT 100")
  var ids []string
  for rfm.Next() {
   var id string
@@ -527,35 +627,44 @@ func runMariaDB() Metrics {
  }
  rfm.Close()
  if len(ids) > 0 {
-  db.Exec(fmt.Sprintf("UPDATE characters SET status = 'Offline' WHERE _id IN (%s)", strings.Join(ids, ",")))
+  db.Exec(fmt.Sprintf("UPDATE orders SET status = 'Shipped' WHERE _id IN (%s)", strings.Join(ids, ",")))
  }
- m.ServerMaintenance = time.Since(start)
+ m.MassDispatch = time.Since(start)
 
  start = time.Now()
- db.Exec("UPDATE characters SET level = 85 WHERE _id IN ('char_10', 'char_20')")
- m.ExpEventUpdate = time.Since(start)
+ db.Exec("UPDATE orders SET quantity = 5000 WHERE _id IN ('order_10', 'order_20')")
+ m.BulkAdjustment = time.Since(start)
 
  start = time.Now()
- db.Exec("DELETE FROM characters WHERE _id IN ('char_60', 'char_70')")
- m.BanWave = time.Since(start)
+ botKeys := make([]string, 10000)
+ for i := 0; i < 10000; i++ {
+  botKeys[i] = fmt.Sprintf("'order_%d'", TotalOrdersHistory-i-1)
+ }
+ db.Exec(fmt.Sprintf("DELETE FROM orders WHERE _id IN (%s)", strings.Join(botKeys, ",")))
+ m.PurgeOldOrders = time.Since(start)
 
  start = time.Now()
  tx, _ := db.Begin()
- tx.Exec("UPDATE characters SET adena = 0 WHERE _id = 'char_10'")
+ tx.Exec("UPDATE orders SET usd_amount = 0 WHERE _id = 'order_10'")
  tx.Rollback()
- m.SafeTradeTx = time.Since(start)
+ m.PaymentACIDTx = time.Since(start)
 
  start = time.Now()
  var wg sync.WaitGroup
- wg.Add(5000)
- for i := 0; i < 5000; i++ {
-  go func() {
+ wg.Add(ConcurrentTx)
+ for i := 0; i < ConcurrentTx; i++ {
+  go func(txID int) {
    defer wg.Done()
-   db.QueryRow("SELECT _id FROM characters WHERE _id = ?", fmt.Sprintf("char_%d", rand.Intn(100000))).Scan(&dump)
-  }()
+   targetOrder := fmt.Sprintf("order_%d", rand.Intn(TotalOrdersHistory-10000))
+   if txID%2 == 0 {
+    db.QueryRow("SELECT _id FROM orders WHERE _id = ?", targetOrder).Scan(&dump)
+   } else {
+    db.Exec("UPDATE orders SET status = 'Processed' WHERE _id = ?", targetOrder)
+   }
+  }(i)
  }
  wg.Wait()
- m.AdenSiegeConcurrency = time.Since(start)
+ m.QuincenaRush = time.Since(start)
 
  start = time.Now()
  db.Exec(fmt.Sprintf("DROP DATABASE %s", dbName))
@@ -568,7 +677,7 @@ func runMariaDB() Metrics {
 // ENGINE 3: POSTGRESQL
 // ==========================================
 func runPostgreSQL() Metrics {
- fmt.Println("\n>>> [3/3] BOOTING GAME SERVER WITH POSTGRESQL <<<")
+ fmt.Println("\n>>> [3/3] BOOTING ENTERPRISE ERP WITH POSTGRESQL <<<")
  var m Metrics
  m.EngineName = "PostgreSQL"
 
@@ -580,8 +689,7 @@ func runPostgreSQL() Metrics {
  dbInit.Ping()
  m.Connection = time.Since(start)
 
- dbName := fmt.Sprintf("l2_db_%d", time.Now().UnixNano())
- start = time.Now()
+ dbName := fmt.Sprintf("polar_db_%d", time.Now().UnixNano())
  dbInit.Exec(fmt.Sprintf("CREATE DATABASE %s;", dbName))
  dbInit.Close()
 
@@ -590,129 +698,147 @@ func runPostgreSQL() Metrics {
  db.SetMaxOpenConns(100)
 
  createTables := `
-  CREATE TABLE castles (_id VARCHAR(50) PRIMARY KEY, name VARCHAR(100), tax_rate DOUBLE PRECISION);
-  CREATE TABLE classes (_id VARCHAR(50) PRIMARY KEY, title VARCHAR(100));
-  CREATE TABLE characters (
-   _id VARCHAR(50) PRIMARY KEY, name VARCHAR(100), level INT, adena DOUBLE PRECISION, castle_id VARCHAR(50), class_id VARCHAR(50), status VARCHAR(20)
+  CREATE TABLE branches (_id VARCHAR(50) PRIMARY KEY, name VARCHAR(100), operating_budget DOUBLE PRECISION);
+  CREATE TABLE products (_id VARCHAR(50) PRIMARY KEY, name VARCHAR(100));
+  CREATE TABLE orders (
+   _id VARCHAR(50) PRIMARY KEY, customer_name VARCHAR(100), quantity INT, total_bs DOUBLE PRECISION, usd_amount DOUBLE PRECISION, branch_id VARCHAR(50), product_id VARCHAR(50), status VARCHAR(20)
   );
-  CREATE INDEX idx_lvl ON characters(level); CREATE INDEX idx_adena ON characters(adena);
-  CREATE INDEX idx_castle ON characters(castle_id); CREATE INDEX idx_status ON characters(status); CREATE INDEX idx_name ON characters(name);
+  CREATE INDEX idx_qty ON orders(quantity); CREATE INDEX idx_bs ON orders(total_bs); CREATE INDEX idx_usd ON orders(usd_amount);
+  CREATE INDEX idx_branch ON orders(branch_id); CREATE INDEX idx_prod ON orders(product_id); CREATE INDEX idx_status ON orders(status); CREATE INDEX idx_name ON orders(customer_name);
+  CREATE INDEX idx_status_qty ON orders(status, quantity);
  `
+ start = time.Now()
  db.Exec(createTables)
  m.Schema = time.Since(start)
 
  start = time.Now()
- for i := 0; i < 9; i++ {
-  db.Exec("INSERT INTO castles VALUES ($1, $2, $3)", fmt.Sprintf("castle_%d", i), "C", 15.0)
+ for i := 0; i < 7; i++ {
+  db.Exec("INSERT INTO branches VALUES ($1, $2, $3)", fmt.Sprintf("branch_%d", i), "Sucursal", 1000000.0)
  }
- for i := 0; i < 20; i++ {
-  db.Exec("INSERT INTO classes VALUES ($1, $2)", fmt.Sprintf("class_%d", i), "Cls")
+ for i := 0; i < 5; i++ {
+  db.Exec("INSERT INTO products VALUES ($1, $2)", fmt.Sprintf("prod_%d", i), "Producto")
  }
- statuses := []string{"Online", "Offline", "PeaceZone", "Chaotic"}
+ statuses := []string{"Pending", "Processed", "Shipped", "Cancelled"}
 
- // Postgres Insert (Fastest syntax for massive bulk inserts in standard PG)
- for i := 0; i < 1000000; i += 5000 {
+ for i := 0; i < TotalOrdersHistory; i += 5000 {
   vals, args := []string{}, []any{}
   for j := 0; j < 5000; j++ {
    id := i + j
-   vals = append(vals, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d)", j*7+1, j*7+2, j*7+3, j*7+4, j*7+5, j*7+6, j*7+7))
-   args = append(args, fmt.Sprintf("char_%d", id), fmt.Sprintf("Hero_%d", id), rand.Intn(85)+1, float64(rand.Intn(2000000000)), fmt.Sprintf("castle_%d", rand.Intn(9)), fmt.Sprintf("class_%d", rand.Intn(20)), statuses[rand.Intn(4)])
+   vals = append(vals, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d, $%d, $%d, $%d)", j*8+1, j*8+2, j*8+3, j*8+4, j*8+5, j*8+6, j*8+7, j*8+8))
+   args = append(args, fmt.Sprintf("order_%d", id), fmt.Sprintf("Supermercado_%d", id), rand.Intn(500)+10, float64(rand.Intn(5000000)), float64(rand.Intn(10000)), fmt.Sprintf("branch_%d", rand.Intn(7)), fmt.Sprintf("prod_%d", rand.Intn(5)), statuses[rand.Intn(4)])
   }
-  db.Exec(fmt.Sprintf("INSERT INTO characters VALUES %s", strings.Join(vals, ",")), args...)
+  db.Exec(fmt.Sprintf("INSERT INTO orders VALUES %s", strings.Join(vals, ",")), args...)
  }
  m.Insert = time.Since(start)
 
  var dump string
+
+ fmt.Printf("⏳ [Phase 3] Action: Concurrent Order Lookups (%d requests)...\n", ConcurrentTx)
  start = time.Now()
- for i := 0; i < 100; i++ {
-  db.QueryRow("SELECT _id FROM characters WHERE _id = 'char_50000'").Scan(&dump)
+ var wg3 sync.WaitGroup
+ wg3.Add(ConcurrentTx)
+ for i := 0; i < ConcurrentTx; i++ {
+  go func() {
+   defer wg3.Done()
+   var localDump string
+   db.QueryRow("SELECT _id FROM orders WHERE _id = $1", fmt.Sprintf("order_%d", rand.Intn(TotalOrdersHistory))).Scan(&localDump)
+  }()
  }
- m.LoginRead = time.Since(start) / 100
+ wg3.Wait()
+ m.OrderRead = time.Since(start) / time.Duration(ConcurrentTx)
 
+ fmt.Printf("⏳ [Phase 4] Action: Mass Price Inflation Adjustments (%d updates)...\n", ConcurrentTx)
  start = time.Now()
- for i := 0; i < 100; i++ {
-  db.Exec("UPDATE characters SET adena = 9999999 WHERE _id = 'char_50000'")
+ var wg4 sync.WaitGroup
+ wg4.Add(ConcurrentTx)
+ for i := 0; i < ConcurrentTx; i++ {
+  go func() {
+   defer wg4.Done()
+   db.Exec("UPDATE orders SET total_bs = 9999999 WHERE _id = $1", fmt.Sprintf("order_%d", rand.Intn(TotalOrdersHistory)))
+  }()
  }
- m.LootUpdate = time.Since(start) / 100
+ wg4.Wait()
+ m.PriceAdjustment = time.Since(start) / time.Duration(ConcurrentTx)
 
  start = time.Now()
- db.Exec("DELETE FROM characters WHERE _id = 'char_50001'")
- m.DeleteChar = time.Since(start)
+ db.Exec("DELETE FROM orders WHERE _id = 'order_50001'")
+ m.DeleteOrder = time.Since(start)
 
  start = time.Now()
- r, _ := db.Query("SELECT _id FROM characters WHERE status = 'Chaotic' AND level BETWEEN 70 AND 85 ORDER BY adena DESC LIMIT 5")
+ r, _ := db.Query("SELECT _id FROM orders WHERE status = 'Processed' AND quantity BETWEEN 400 AND 500 ORDER BY usd_amount DESC LIMIT 5")
  for r.Next() {
   r.Scan(&dump)
  }
  r.Close()
- m.EventQuery = time.Since(start)
+ m.HighValueQuery = time.Since(start)
 
  start = time.Now()
- rc, _ := db.Query("SELECT _id FROM characters WHERE (status = 'Chaotic' AND level < 20) OR adena > 1900000000 LIMIT 5")
+ rc, _ := db.Query("SELECT _id FROM orders WHERE (status = 'Processed' AND quantity < 50) OR usd_amount > 9000 LIMIT 5")
  for rc.Next() {
   rc.Scan(&dump)
  }
  rc.Close()
- m.AntiCheat = time.Since(start)
+ m.FraudDetection = time.Since(start)
 
  start = time.Now()
- rw, _ := db.Query("SELECT _id FROM characters WHERE name LIKE 'Hero_777%' LIMIT 5")
+ rw, _ := db.Query("SELECT _id FROM orders WHERE customer_name LIKE 'Supermercado_777%' LIMIT 5")
  for rw.Next() {
   rw.Scan(&dump)
  }
  rw.Close()
- m.SearchPlayer = time.Since(start)
+ m.SearchCustomer = time.Since(start)
 
  start = time.Now()
- rp, _ := db.Query("SELECT _id FROM characters ORDER BY level DESC LIMIT 10 OFFSET 1000")
+ rp, _ := db.Query("SELECT _id FROM orders ORDER BY quantity DESC LIMIT 10 OFFSET 1000")
  for rp.Next() {
   rp.Scan(&dump)
  }
  rp.Close()
- m.ShortLeaderboard = time.Since(start)
+ m.TopOrdersRanking = time.Since(start)
 
+ fmt.Println("⏳ [Phase 10] Report: Deep Pagination by USD Value (Offset 500k)...")
  start = time.Now()
- rdp, _ := db.Query("SELECT _id FROM characters ORDER BY adena ASC LIMIT 5 OFFSET 800000")
+ rdp, _ := db.Query("SELECT _id FROM orders ORDER BY usd_amount ASC LIMIT 5 OFFSET 500000")
  for rdp.Next() {
   rdp.Scan(&dump)
  }
  rdp.Close()
- m.DeepLeaderboard = time.Since(start)
+ m.DeepPagination = time.Since(start)
 
  start = time.Now()
- rdis, _ := db.Query("SELECT DISTINCT level FROM characters")
+ rdis, _ := db.Query("SELECT DISTINCT quantity FROM orders")
  for rdis.Next() {
   rdis.Scan(&dump)
  }
  rdis.Close()
- m.DistinctLevels = time.Since(start)
+ m.DistinctQuantities = time.Since(start)
 
  start = time.Now()
- rj, _ := db.Query("SELECT c._id FROM characters c LEFT JOIN castles m ON c.castle_id = m._id LEFT JOIN classes cls ON c.class_id = cls._id WHERE c.name LIKE 'Hero_999%' LIMIT 5")
+ rj, _ := db.Query("SELECT o._id FROM orders o LEFT JOIN branches b ON o.branch_id = b._id LEFT JOIN products p ON o.product_id = p._id WHERE o.customer_name LIKE 'Supermercado_999%' LIMIT 5")
  for rj.Next() {
   rj.Scan(&dump)
  }
  rj.Close()
- m.ViewProfile = time.Since(start)
+ m.FullInvoiceJoin = time.Since(start)
 
  start = time.Now()
- rag, _ := db.Query("SELECT castle_id, COUNT(*) FROM characters GROUP BY castle_id")
+ rag, _ := db.Query("SELECT branch_id, COUNT(*) FROM orders GROUP BY branch_id")
  for rag.Next() {
   rag.Scan(&dump, &dump)
  }
  rag.Close()
- m.SimpleCensus = time.Since(start)
+ m.SalesByBranch = time.Since(start)
 
  start = time.Now()
- ram, _ := db.Query("SELECT castle_id, status, COUNT(*), SUM(adena) FROM characters GROUP BY castle_id, status")
+ ram, _ := db.Query("SELECT branch_id, status, COUNT(*), SUM(usd_amount) FROM orders GROUP BY branch_id, status")
  for ram.Next() {
   ram.Scan(&dump, &dump, &dump, &dump)
  }
  ram.Close()
- m.GlobalEconomy = time.Since(start)
+ m.GlobalRevenue = time.Since(start)
 
  start = time.Now()
- rfm, _ := db.Query("SELECT _id FROM characters WHERE status = 'Online' LIMIT 1000")
+ rfm, _ := db.Query("SELECT _id FROM orders WHERE status = 'Pending' LIMIT 100")
  var ids []string
  for rfm.Next() {
   var id string
@@ -721,42 +847,47 @@ func runPostgreSQL() Metrics {
  }
  rfm.Close()
  if len(ids) > 0 {
-  db.Exec(fmt.Sprintf("UPDATE characters SET status = 'Offline' WHERE _id IN (%s)", strings.Join(ids, ",")))
+  db.Exec(fmt.Sprintf("UPDATE orders SET status = 'Shipped' WHERE _id IN (%s)", strings.Join(ids, ",")))
  }
- m.ServerMaintenance = time.Since(start)
+ m.MassDispatch = time.Since(start)
 
  start = time.Now()
- db.Exec("UPDATE characters SET level = 85 WHERE _id IN ('char_10', 'char_20')")
- m.ExpEventUpdate = time.Since(start)
+ db.Exec("UPDATE orders SET quantity = 5000 WHERE _id IN ('order_10', 'order_20')")
+ m.BulkAdjustment = time.Since(start)
 
  start = time.Now()
- db.Exec("DELETE FROM characters WHERE _id IN ('char_60', 'char_70')")
- m.BanWave = time.Since(start)
+ botKeys := make([]string, 10000)
+ for i := 0; i < 10000; i++ {
+  botKeys[i] = fmt.Sprintf("'order_%d'", TotalOrdersHistory-i-1)
+ }
+ db.Exec(fmt.Sprintf("DELETE FROM orders WHERE _id IN (%s)", strings.Join(botKeys, ",")))
+ m.PurgeOldOrders = time.Since(start)
 
  start = time.Now()
  tx, _ := db.Begin()
- tx.Exec("UPDATE characters SET adena = 0 WHERE _id = 'char_10'")
+ tx.Exec("UPDATE orders SET usd_amount = 0 WHERE _id = 'order_10'")
  tx.Rollback()
- m.SafeTradeTx = time.Since(start)
+ m.PaymentACIDTx = time.Since(start)
 
  start = time.Now()
  var wg sync.WaitGroup
- wg.Add(5000)
- for i := 0; i < 5000; i++ {
-  go func() {
+ wg.Add(ConcurrentTx)
+ for i := 0; i < ConcurrentTx; i++ {
+  go func(txID int) {
    defer wg.Done()
-   db.QueryRow("SELECT _id FROM characters WHERE _id = $1", fmt.Sprintf("char_%d", rand.Intn(100000))).Scan(&dump)
-  }()
+   targetOrder := fmt.Sprintf("order_%d", rand.Intn(TotalOrdersHistory-10000))
+   if txID%2 == 0 {
+    db.QueryRow("SELECT _id FROM orders WHERE _id = $1", targetOrder).Scan(&dump)
+   } else {
+    db.Exec("UPDATE orders SET status = 'Processed' WHERE _id = $1", targetOrder)
+   }
+  }(i)
  }
  wg.Wait()
- m.AdenSiegeConcurrency = time.Since(start)
+ m.QuincenaRush = time.Since(start)
 
  start = time.Now()
- // To safely drop a database in PostgreSQL, we must close connections to it and use the initial connection
- db.Close()
- dbInit, _ = sql.Open("postgres", "postgres://postgres:12345678@localhost:5432/postgres?sslmode=disable")
- dbInit.Exec(fmt.Sprintf("DROP DATABASE %s;", dbName))
- dbInit.Close()
+ db.Exec(fmt.Sprintf("DROP DATABASE %s", dbName))
  m.Cleanup = time.Since(start)
 
  return m
@@ -767,16 +898,16 @@ func runPostgreSQL() Metrics {
 // ==========================================
 func printComparison(mt, maria, pg Metrics) {
  fmt.Println("\n================================================================================================================================")
- fmt.Println(" 🏆 FINAL PERFORMANCE RESULTS: LunaDB vs MARIADB vs POSTGRESQL (LINEAGE II SERVER: 1M CHARS) 🏆 ")
+ fmt.Printf(" 📈 FINAL PERFORMANCE RESULTS: LunaDB vs MARIADB vs POSTGRESQL (ENTERPRISE ERP: %dK DB, %dk CCU) 📈 \n", TotalOrdersHistory/1000, ConcurrentTx/1000)
  fmt.Println("================================================================================================================================")
 
  w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', tabwriter.AlignRight|tabwriter.Debug)
 
- fmt.Fprintln(w, "Game Event / Metric\tLunaDB\tMariaDB\tPostgreSQL\tAbsolute Winner\t")
- fmt.Fprintln(w, "-------------------\t------------\t-------\t----------\t---------------\t")
+ fmt.Fprintln(w, "Business Process / Metric\tLunaDB\tMariaDB\tPostgreSQL\tAbsolute Winner\t")
+ fmt.Fprintln(w, "-------------------------\t------------\t-------\t----------\t---------------\t")
 
  compare := func(name string, t1, t2, t3 time.Duration) {
-  winner := "LunaDB 🚀"
+  winner := "LunaDB 🐺"
   minTime := t1
 
   if t2 < minTime {
@@ -790,30 +921,30 @@ func printComparison(mt, maria, pg Metrics) {
   fmt.Fprintf(w, "%s\t%v\t%v\t%v\t%s\t\n", name, t1, t2, t3, winner)
  }
 
- compare("0. Boot: Login Server Conn", mt.Connection, maria.Connection, pg.Connection)
- compare("1. Init: Load Maps/Zones", mt.Schema, maria.Schema, pg.Schema)
- compare("2. Spawn: Gen 1M Characters", mt.Insert, maria.Insert, pg.Insert)
- compare("3. Action: Login Char (Read)", mt.LoginRead, maria.LoginRead, pg.LoginRead)
- compare("4. Action: Loot Adena (Update)", mt.LootUpdate, maria.LootUpdate, pg.LootUpdate)
- compare("5. Action: PK Delete (Drop Char)", mt.DeleteChar, maria.DeleteChar, pg.DeleteChar)
- compare("6. Event: Seven Signs (Query)", mt.EventQuery, maria.EventQuery, pg.EventQuery)
- compare("7. Admin: Anti-Bot System", mt.AntiCheat, maria.AntiCheat, pg.AntiCheat)
- compare("8. UI: Search Clan Member", mt.SearchPlayer, maria.SearchPlayer, pg.SearchPlayer)
- compare("9. UI: Top 10 PvP Players", mt.ShortLeaderboard, maria.ShortLeaderboard, pg.ShortLeaderboard)
- compare("10. UI: Deep Global Ranking", mt.DeepLeaderboard, maria.DeepLeaderboard, pg.DeepLeaderboard)
- compare("11. Stats: Level Curve", mt.DistinctLevels, maria.DistinctLevels, pg.DistinctLevels)
- compare("12. UI: View Profile (Joins)", mt.ViewProfile, maria.ViewProfile, pg.ViewProfile)
- compare("13. Stats: Castle Population", mt.SimpleCensus, maria.SimpleCensus, pg.SimpleCensus)
- compare("14. Stats: Aden Economy", mt.GlobalEconomy, maria.GlobalEconomy, pg.GlobalEconomy)
- compare("15. Server: Mass Maintenance", mt.ServerMaintenance, maria.ServerMaintenance, pg.ServerMaintenance)
- compare("16. Admin: Grant Max EXP", mt.ExpEventUpdate, maria.ExpEventUpdate, pg.ExpEventUpdate)
- compare("17. Admin: Bot Ban Wave", mt.BanWave, maria.BanWave, pg.BanWave)
- compare("18. Trade: Safe Exchange", mt.SafeTradeTx, maria.SafeTradeTx, pg.SafeTradeTx)
- compare("19. Event: Aden Castle Siege", mt.AdenSiegeConcurrency, maria.AdenSiegeConcurrency, pg.AdenSiegeConcurrency)
+ compare("0. Boot: ERP System Conn", mt.Connection, maria.Connection, pg.Connection)
+ compare("1. Init: Load Schema/Indexes", mt.Schema, maria.Schema, pg.Schema)
+ compare("2. Data Gen: Hist. Orders", mt.Insert, maria.Insert, pg.Insert)
+ compare("3. Action: Concurrent Lookup", mt.OrderRead, maria.OrderRead, pg.OrderRead)
+ compare("4. Action: Price Adjustments", mt.PriceAdjustment, maria.PriceAdjustment, pg.PriceAdjustment)
+ compare("5. Action: Cancel Order (Del)", mt.DeleteOrder, maria.DeleteOrder, pg.DeleteOrder)
+ compare("6. Report: High Value Orders", mt.HighValueQuery, maria.HighValueQuery, pg.HighValueQuery)
+ compare("7. Audit: Fraud Detection", mt.FraudDetection, maria.FraudDetection, pg.FraudDetection)
+ compare("8. Support: Search Customer", mt.SearchCustomer, maria.SearchCustomer, pg.SearchCustomer)
+ compare("9. Report: Top Largest Orders", mt.TopOrdersRanking, maria.TopOrdersRanking, pg.TopOrdersRanking)
+ compare("10. Report: Deep Pagin. (USD)", mt.DeepPagination, maria.DeepPagination, pg.DeepPagination)
+ compare("11. BI: Distinct Quantities", mt.DistinctQuantities, maria.DistinctQuantities, pg.DistinctQuantities)
+ compare("12. ERP: Full Invoice (Joins)", mt.FullInvoiceJoin, maria.FullInvoiceJoin, pg.FullInvoiceJoin)
+ compare("13. BI: Orders by Branch", mt.SalesByBranch, maria.SalesByBranch, pg.SalesByBranch)
+ compare("14. BI: USD Revenue by Branch", mt.GlobalRevenue, maria.GlobalRevenue, pg.GlobalRevenue)
+ compare("15. Logistics: Mass Dispatch", mt.MassDispatch, maria.MassDispatch, pg.MassDispatch)
+ compare("16. Admin: Bulk Qty Adjust", mt.BulkAdjustment, maria.BulkAdjustment, pg.BulkAdjustment)
+ compare("17. Maint: Purge Old Orders", mt.PurgeOldOrders, maria.PurgeOldOrders, pg.PurgeOldOrders)
+ compare("18. Finance: Payment ACID Tx", mt.PaymentACIDTx, maria.PaymentACIDTx, pg.PaymentACIDTx)
+ compare("19. Stress: Quincena Rush", mt.QuincenaRush, maria.QuincenaRush, pg.QuincenaRush)
 
  w.Flush()
  fmt.Println("================================================================================================================================")
- fmt.Println("Note: Simulating MMORPG production conditions. Execution times include network latency from Go client.")
+ fmt.Println("Note: Simulating Corporate ERP Peak. Quincena Rush mixes high concurrency reads & status updates.")
 }
 
 ```
