@@ -334,13 +334,32 @@ func (c *Client) internalExecute(cw *connWrapper, cmd byte, writerFunc func(cw *
 
 // execute es para comandos sueltos (toma una conexión y la devuelve).
 func (c *Client) execute(cmd byte, writerFunc func(cw *connWrapper) error) (*CommandResponse, error) {
+	// 1. Obtenemos una conexión del pool
 	cw, err := c.getConn()
 	if err != nil {
 		return nil, err
 	}
-	defer c.putConn(cw)
 
-	return c.internalExecute(cw, cmd, writerFunc, true)
+	// 2. Ejecutamos el comando
+	resp, executeErr := c.internalExecute(cw, cmd, writerFunc, true)
+
+	// 3. Evaluamos la salud de la conexión antes de devolverla
+	if c.isNetworkError(executeErr) {
+		// La conexión murió. Intentamos reemplazarla por una nueva.
+		newCw, replaceErr := c.replaceConn(cw)
+		if replaceErr == nil {
+			// Éxito al reconectar, devolvemos la conexión sana al pool
+			c.putConn(newCw)
+		}
+		// Si replaceErr falla, la conexión rota simplemente se descarta.
+		// Podrías implementar lógica adicional para recuperar el tamaño del pool más adelante.
+	} else {
+		// Si no hubo error, o fue un error lógico de la BD (ej. clave no encontrada),
+		// la conexión TCP sigue sana, así que la devolvemos normal.
+		c.putConn(cw)
+	}
+
+	return resp, executeErr
 }
 
 // --- Optimizaciones de E/S ---
