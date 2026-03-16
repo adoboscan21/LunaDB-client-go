@@ -12,7 +12,6 @@ import (
 	"os"
 	"sync"
 	"syscall"
-	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
 )
@@ -544,7 +543,7 @@ func (t *Tx) Rollback() (*CommandResponse, error) {
 }
 
 // Métodos de mutación exclusivos de la transacción (Amarrados al Tx)
-func (t *Tx) CollectionItemSet(collectionName, key string, value any, ttl time.Duration) (*CommandResponse, error) {
+func (t *Tx) CollectionItemSet(collectionName, key string, value any) (*CommandResponse, error) {
 	valueBytes, err := bson.Marshal(value)
 	if err != nil {
 		return nil, err
@@ -556,10 +555,7 @@ func (t *Tx) CollectionItemSet(collectionName, key string, value any, ttl time.D
 		if err := t.client.writeString(cw, key); err != nil {
 			return err
 		}
-		if err := t.client.writeBytes(cw, valueBytes); err != nil {
-			return err
-		}
-		return t.client.writeInt64(cw, int64(ttl.Seconds()))
+		return t.client.writeBytes(cw, valueBytes)
 	})
 }
 
@@ -695,7 +691,7 @@ func (c *Client) CollectionIndexList(collectionName string) ([]string, error) {
 	return wrapper.List, nil
 }
 
-func (c *Client) CollectionItemSet(collectionName, key string, value any, ttl time.Duration) (*CommandResponse, error) {
+func (c *Client) CollectionItemSet(collectionName, key string, value any) (*CommandResponse, error) {
 	valueBytes, err := bson.Marshal(value)
 	if err != nil {
 		return nil, fmt.Errorf("bson marshal error: %w", err)
@@ -708,10 +704,7 @@ func (c *Client) CollectionItemSet(collectionName, key string, value any, ttl ti
 		if err := c.writeString(cw, key); err != nil {
 			return err
 		}
-		if err := c.writeBytes(cw, valueBytes); err != nil {
-			return err
-		}
-		return c.writeInt64(cw, int64(ttl.Seconds()))
+		return c.writeBytes(cw, valueBytes)
 	})
 }
 
