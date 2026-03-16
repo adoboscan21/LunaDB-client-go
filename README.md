@@ -1,4 +1,4 @@
-# 🐺 LunaDB Go Client SDK
+# 🐈 LunaDB Go Client SDK
 
 The official Go client library for **LunaDB**. This SDK provides a thread-safe, connection-pooled, and highly optimized interface to interact with your LunaDB server. It handles TLS encryption, connection multiplexing, and automatic Go-struct-to-BSON serialization seamlessly.
 
