@@ -32,10 +32,14 @@ const (
 	cmdCollectionItemDeleteMany byte = 15
 	cmdCollectionItemUpdate     byte = 16
 	cmdCollectionItemUpdateMany byte = 17
-	cmdAuthenticate             byte = 18
-	cmdBegin                    byte = 25
-	cmdCommit                   byte = 26
-	cmdRollback                 byte = 27
+	cmdCollectionUpdateWhere    byte = 18
+	cmdCollectionDeleteWhere    byte = 19
+
+	cmdAuthenticate byte = 20
+
+	cmdBegin    byte = 27
+	cmdCommit   byte = 28
+	cmdRollback byte = 29
 
 	statusOK           = 1
 	statusNotFound     = 2
@@ -112,18 +116,33 @@ func (r *GetResult) Value(v any) error {
 
 // --- Query Builder ---
 
+// OrderByClause define el criterio de ordenamiento
+type OrderByClause struct {
+	Field     string `bson:"field"`
+	Direction string `bson:"direction"` // "asc" o "desc"
+}
+
+// LookupClause define un join entre colecciones
+type LookupClause struct {
+	FromCollection string `bson:"from"`
+	LocalField     string `bson:"localField"`
+	ForeignField   string `bson:"foreignField"`
+	As             string `bson:"as"`
+}
+
+// Query representa una consulta compleja a la base de datos
 type Query struct {
-	Filter       map[string]any `bson:"filter,omitempty"`
-	OrderBy      []any          `bson:"order_by,omitempty"`
-	Limit        *int           `bson:"limit,omitempty"`
-	Offset       int            `bson:"offset,omitempty"`
-	Count        bool           `bson:"count,omitempty"`
-	Aggregations map[string]any `bson:"aggregations,omitempty"`
-	GroupBy      []string       `bson:"group_by,omitempty"`
-	Having       map[string]any `bson:"having,omitempty"`
-	Distinct     string         `bson:"distinct,omitempty"`
-	Projection   []string       `bson:"projection,omitempty"`
-	Lookups      []any          `bson:"lookups,omitempty"`
+	Filter       map[string]any  `bson:"filter,omitempty"`
+	OrderBy      []OrderByClause `bson:"order_by,omitempty"` // <-- Tipado fuerte
+	Limit        *int            `bson:"limit,omitempty"`
+	Offset       int             `bson:"offset,omitempty"`
+	Count        bool            `bson:"count,omitempty"`
+	Aggregations map[string]any  `bson:"aggregations,omitempty"`
+	GroupBy      []string        `bson:"group_by,omitempty"`
+	Having       map[string]any  `bson:"having,omitempty"`
+	Distinct     string          `bson:"distinct,omitempty"`
+	Projection   []string        `bson:"projection,omitempty"`
+	Lookups      []LookupClause  `bson:"lookups,omitempty"` // <-- Tipado fuerte
 }
 
 // --- Infraestructura del Connection Pool ---
@@ -627,6 +646,41 @@ func (t *Tx) CollectionItemDeleteMany(collectionName string, keys []string) (*Co
 	})
 }
 
+func (t *Tx) CollectionUpdateWhere(collectionName string, query Query, patch any) (*CommandResponse, error) {
+	queryBytes, err := bson.Marshal(query)
+	if err != nil {
+		return nil, err
+	}
+	patchBytes, err := bson.Marshal(patch)
+	if err != nil {
+		return nil, err
+	}
+
+	return t.execute(cmdCollectionUpdateWhere, func(cw *connWrapper) error {
+		if err := t.client.writeString(cw, collectionName); err != nil {
+			return err
+		}
+		if err := t.client.writeBytes(cw, queryBytes); err != nil {
+			return err
+		}
+		return t.client.writeBytes(cw, patchBytes)
+	})
+}
+
+func (t *Tx) CollectionDeleteWhere(collectionName string, query Query) (*CommandResponse, error) {
+	queryBytes, err := bson.Marshal(query)
+	if err != nil {
+		return nil, err
+	}
+
+	return t.execute(cmdCollectionDeleteWhere, func(cw *connWrapper) error {
+		if err := t.client.writeString(cw, collectionName); err != nil {
+			return err
+		}
+		return t.client.writeBytes(cw, queryBytes)
+	})
+}
+
 // =========================================================================
 // API PÚBLICA ESTÁNDAR (STATELESS)
 // =========================================================================
@@ -796,6 +850,43 @@ func (c *Client) CollectionQuery(collectionName string, query Query) (*CommandRe
 	}
 
 	return c.execute(cmdCollectionQuery, func(cw *connWrapper) error {
+		if err := c.writeString(cw, collectionName); err != nil {
+			return err
+		}
+		return c.writeBytes(cw, queryBytes)
+	})
+}
+
+// CollectionUpdateWhere actualiza documentos que coincidan con el query especificado.
+func (c *Client) CollectionUpdateWhere(collectionName string, query Query, patch any) (*CommandResponse, error) {
+	queryBytes, err := bson.Marshal(query)
+	if err != nil {
+		return nil, fmt.Errorf("bson marshal query error: %w", err)
+	}
+	patchBytes, err := bson.Marshal(patch)
+	if err != nil {
+		return nil, fmt.Errorf("bson marshal patch error: %w", err)
+	}
+
+	return c.execute(cmdCollectionUpdateWhere, func(cw *connWrapper) error {
+		if err := c.writeString(cw, collectionName); err != nil {
+			return err
+		}
+		if err := c.writeBytes(cw, queryBytes); err != nil {
+			return err
+		}
+		return c.writeBytes(cw, patchBytes)
+	})
+}
+
+// CollectionDeleteWhere elimina documentos que coincidan con el query especificado.
+func (c *Client) CollectionDeleteWhere(collectionName string, query Query) (*CommandResponse, error) {
+	queryBytes, err := bson.Marshal(query)
+	if err != nil {
+		return nil, fmt.Errorf("bson marshal query error: %w", err)
+	}
+
+	return c.execute(cmdCollectionDeleteWhere, func(cw *connWrapper) error {
 		if err := c.writeString(cw, collectionName); err != nil {
 			return err
 		}
