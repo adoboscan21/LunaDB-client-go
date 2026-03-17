@@ -18,29 +18,35 @@ import (
 
 // --- Constantes del Protocolo ---
 const (
-	cmdCollectionCreate         byte = 3
-	cmdCollectionDelete         byte = 4
-	cmdCollectionList           byte = 5
-	cmdCollectionIndexCreate    byte = 6
-	cmdCollectionIndexDelete    byte = 7
-	cmdCollectionIndexList      byte = 8
-	cmdCollectionItemSet        byte = 9
-	cmdCollectionItemSetMany    byte = 10
-	cmdCollectionItemGet        byte = 11
-	cmdCollectionItemDelete     byte = 12
-	cmdCollectionQuery          byte = 14
-	cmdCollectionItemDeleteMany byte = 15
-	cmdCollectionItemUpdate     byte = 16
-	cmdCollectionItemUpdateMany byte = 17
-	cmdCollectionUpdateWhere    byte = 18
-	cmdCollectionDeleteWhere    byte = 19
+	// Collection Management Commands
+	cmdCollectionCreate      byte = 1
+	cmdCollectionDelete      byte = 2
+	cmdCollectionList        byte = 3
+	cmdCollectionIndexCreate byte = 4
+	cmdCollectionIndexDelete byte = 5
+	cmdCollectionIndexList   byte = 6
 
-	cmdAuthenticate byte = 20
+	// Collection Item Commands
+	cmdCollectionItemSet        byte = 7
+	cmdCollectionItemSetMany    byte = 8
+	cmdCollectionItemGet        byte = 9
+	cmdCollectionItemDelete     byte = 10
+	cmdCollectionQuery          byte = 12
+	cmdCollectionItemDeleteMany byte = 13
+	cmdCollectionItemUpdate     byte = 14
+	cmdCollectionItemUpdateMany byte = 15
+	cmdCollectionUpdateWhere    byte = 16
+	cmdCollectionDeleteWhere    byte = 17
 
-	cmdBegin    byte = 27
-	cmdCommit   byte = 28
-	cmdRollback byte = 29
+	// Authentication Commands
+	cmdAuthenticate byte = 18
 
+	// Transaction Commands
+	cmdBegin    byte = 25
+	cmdCommit   byte = 26
+	cmdRollback byte = 27
+
+	// Status Codes (Estos se mantienen igual)
 	statusOK           = 1
 	statusNotFound     = 2
 	statusError        = 3
