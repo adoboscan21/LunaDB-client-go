@@ -364,19 +364,33 @@ func (c *Client) execute(cmd byte, writerFunc func(cw *connWrapper) error) (*Com
 		return nil, err
 	}
 
-	// 2. Ejecutamos el comando
+	// 2. AUTO-SANACIÓN: Si la conexión obtenida del pool está muerta/vacía
+	// (dejada por un fallo anterior), intentamos revivirla ANTES de usarla.
+	if cw.conn == nil {
+		newCw, replaceErr := c.replaceConn(cw)
+		if replaceErr != nil {
+			// Sigue fallando. Devolvemos el envoltorio vacío para no achicar el pool permanentemente.
+			c.putConn(cw)
+			return nil, fmt.Errorf("connection pool degradation, auto-heal failed: %w", replaceErr)
+		}
+		cw = newCw
+	}
+
+	// 3. Ejecutamos el comando
 	resp, executeErr := c.internalExecute(cw, cmd, writerFunc, true)
 
-	// 3. Evaluamos la salud de la conexión antes de devolverla
+	// 4. Evaluamos la salud de la conexión después de usarla
 	if c.isNetworkError(executeErr) {
-		// La conexión murió. Intentamos reemplazarla por una nueva.
+		// La conexión murió. Intentamos reemplazarla por una nueva de inmediato.
 		newCw, replaceErr := c.replaceConn(cw)
 		if replaceErr == nil {
-			// Éxito al reconectar, devolvemos la conexión sana al pool
+			// Éxito al reconectar en caliente, devolvemos la conexión sana al pool
 			c.putConn(newCw)
+		} else {
+			// CRÍTICO: Falló la reconexión. Devolvemos un envoltorio VACÍO
+			// en lugar de ignorarlo, para que el Pool no se quede sin cupos.
+			c.putConn(&connWrapper{})
 		}
-		// Si replaceErr falla, la conexión rota simplemente se descarta.
-		// Podrías implementar lógica adicional para recuperar el tamaño del pool más adelante.
 	} else {
 		// Si no hubo error, o fue un error lógico de la BD (ej. clave no encontrada),
 		// la conexión TCP sigue sana, así que la devolvemos normal.
